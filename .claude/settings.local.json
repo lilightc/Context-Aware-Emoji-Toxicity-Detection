@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(du:*)",
+      "Bash(gh auth:*)",
+      "Bash(security find-internet-password:*)"
+    ]
+  }
+}
