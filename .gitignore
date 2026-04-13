@@ -2,3 +2,12 @@
 __pycache__/
 *.pyc
 .DS_Store
+*.egg-info/
+dist/
+build/
+.ruff_cache/
+data/raw/
+data/results/
+data/chroma_db/
+.pytest_cache/
+notebooks/.ipynb_checkpoints/
