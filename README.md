@@ -93,13 +93,37 @@ Message + Context
 
 The KB is **append-only** (old slang doesn't stop being slang) and **version-tagged** (freshness tracking). User-flagged misclassifications feed back into the update cycle via the Gradio demo's "Flag Misclassification" tab.
 
+### Agent Mode (experimental)
+
+A tool-calling GPT-5 agent that decides **whether and what to retrieve**:
+
+```
+Message + Context
+       │
+       ▼
+┌───────────────────────────────────────────────────┐
+│ Agent loop (GPT-5 with bind_tools, max 4 iter.)   │
+│                                                   │
+│  Tools:                                           │
+│    get_cldr_name(emoji)          → local lookup   │
+│    lookup_emoji_knowledge(emoji) → Pinecone       │
+│    search_similar_cases(query)   → Pinecone       │
+│    submit_verdict(score, ...)    → terminal       │
+│                                                   │
+│  Agent decides whether to retrieve, which emoji   │
+│  to look up, and when to submit the final score.  │
+└───────────────────────────────────────────────────┘
+```
+
+**Ablation result:** In our experiments, the agent skipped retrieval on 54% of samples but achieved **lower accuracy than workflow** (0.910 vs 0.948) because it defaults to "looks safe, skip retrieval" on ambiguous cases — exactly where retrieval is most needed. Workflow is also 2.2× faster (1 LLM call vs 2-4 round-trips). The agent remains as an experimental option for research and for future scenarios with multiple heterogeneous tools.
+
 ### Three Operating Modes
 
-| Mode | Description | Best for |
-|------|-------------|----------|
-| `workflow` | Always retrieve → classify → gate | Production (best accuracy + speed) |
-| `adaptive` | Heuristic gate decides whether to retrieve | Cost optimization on mostly-safe traffic |
-| `agent` | GPT-5 tool-calling decides what to retrieve | Research / demo (shows tool-calling capability) |
+| Mode | Accuracy | Latency | Best for |
+|------|----------|---------|----------|
+| `workflow` | **0.948** | **11.0s** | Production (best accuracy + speed) |
+| `adaptive` | — | — | Cost optimization on mostly-safe traffic |
+| `agent` | 0.910 | 24.2s | Research / demo (tool-calling capability) |
 
 ## Quick Start
 
