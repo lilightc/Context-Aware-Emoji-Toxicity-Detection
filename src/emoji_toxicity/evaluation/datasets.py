@@ -2,12 +2,39 @@
 
 from __future__ import annotations
 
+import random
+from collections import defaultdict
 from dataclasses import dataclass
 
 import emoji
 from datasets import load_dataset
 
 from emoji_toxicity.config import settings
+
+
+def stratified_sample(samples: list, n: int, seed: int = 0) -> list:
+    """Return a class-balanced sample of size ≤ n, preserving label proportions.
+
+    Guarantees both labels are represented when both exist in the source.
+    """
+    if n >= len(samples):
+        return samples
+    rng = random.Random(seed)
+    by_label: dict[int, list] = defaultdict(list)
+    for s in samples:
+        by_label[s.label].append(s)
+
+    per_class = max(1, n // len(by_label))
+    picked: list = []
+    for label, bucket in by_label.items():
+        rng.shuffle(bucket)
+        picked.extend(bucket[:per_class])
+
+    # If rounding left us short of n, fill from the remainder, preserving the RNG draw.
+    remaining = [s for label, bucket in by_label.items() for s in bucket[per_class:]]
+    rng.shuffle(remaining)
+    picked.extend(remaining[: max(0, n - len(picked))])
+    return picked
 
 
 @dataclass
@@ -24,6 +51,10 @@ def load_hatemoji_check() -> list[EvalSample]:
     """Load HatemojiCheck test set (Kirk et al., 2022).
 
     Filters to examples containing emoji. Returns list of EvalSample.
+
+    Gated on HF — requires access request on the dataset page. Falls back to an
+    empty list with a warning (caller should consider load_hatemoji_build_test
+    as an alternative non-gated evaluation split).
     """
     try:
         ds = load_dataset("HannahRoseKirk/HatemojiCheck", token=settings.hf_token)
@@ -36,20 +67,50 @@ def load_hatemoji_check() -> list[EvalSample]:
 
     for row in ds[split]:
         text = row.get("text", "")
-        # Only include examples that contain emoji
-        has_emoji = any(ch in emoji.EMOJI_DATA for ch in text)
-        if not has_emoji:
+        if not any(ch in emoji.EMOJI_DATA for ch in text):
             continue
 
         label = row.get("label_gold", row.get("label", 0))
         perturbation = row.get("perturbation_type", row.get("type", ""))
 
         samples.append(EvalSample(
-            text=text,
-            context="",
+            text=text, context="",
             label=int(label),
             source="HatemojiCheck",
             perturbation_type=str(perturbation),
+        ))
+
+    return samples
+
+
+def load_hatemoji_build_test() -> list[EvalSample]:
+    """Load HatemojiBuild test split (Kirk et al., 2022) as an emoji-focused
+    evaluation set. Accessible with the same HF_TOKEN used for KB construction.
+
+    The KB was built from the train split only, so using test here does not leak.
+    """
+    try:
+        ds = load_dataset("HannahRoseKirk/HatemojiBuild", token=settings.hf_token)
+    except Exception as e:
+        print(f"[WARN] Could not load HatemojiBuild: {e}")
+        return []
+
+    if "test" not in ds:
+        print(f"[WARN] HatemojiBuild has no test split. Found: {list(ds.keys())}")
+        return []
+
+    samples = []
+    for row in ds["test"]:
+        text = row.get("text", "")
+        if not any(ch in emoji.EMOJI_DATA for ch in text):
+            continue
+
+        label = row.get("label_gold", row.get("label", 0))
+        samples.append(EvalSample(
+            text=text, context="",
+            label=int(label),
+            source="HatemojiBuild-test",
+            perturbation_type="",
         ))
 
     return samples

@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 import gradio as gr
 
 from emoji_toxicity.detector.pipeline import ToxicityDetector
+from emoji_toxicity.detector.tools import TERMINAL_TOOL_NAME
 
 detector = ToxicityDetector()
 
@@ -56,13 +57,28 @@ def analyze(message: str, context: str) -> str:
             citations_html += f"<li>{c}</li>"
         citations_html += "</ul>"
 
+    # Agent trace — show which tools the agent chose to call
+    agent_html = ""
+    if result.agent_trace is not None:
+        trace = result.agent_trace
+        n_info_calls = sum(1 for c in trace.tool_calls if c["name"] != TERMINAL_TOOL_NAME)
+        tool_rows = "".join(
+            f"<li><code>{c['name']}</code>({', '.join(f'{k}={v!r}' for k, v in c['args'].items())})</li>"
+            for c in trace.tool_calls
+            if c["name"] != TERMINAL_TOOL_NAME
+        )
+        agent_html = f"""
+        <h4>Agent decisions ({n_info_calls} info tool call{'s' if n_info_calls != 1 else ''} in {trace.iterations} iteration{'s' if trace.iterations != 1 else ''})</h4>
+        <ul>{tool_rows or '<li><em>None — agent classified without retrieval</em></li>'}</ul>
+        """
+
     html = f"""
     <div style="font-family:sans-serif;padding:16px">
         <div style="text-align:center;margin-bottom:16px">
             <span style="background:{color};color:white;padding:8px 24px;border-radius:8px;
                          font-size:1.5em;font-weight:bold">{result.verdict}</span>
             <p style="margin-top:8px;color:#666">
-                Confidence: {result.confidence:.0%} | Category: {result.risk_category}
+                Toxicity score: {result.toxicity_score:.2f} | Category: {result.risk_category}
             </p>
         </div>
 
@@ -79,6 +95,7 @@ def analyze(message: str, context: str) -> str:
             {emoji_rows}
         </table>
 
+        {agent_html}
         {citations_html}
     </div>
     """
@@ -115,14 +132,51 @@ demo = gr.Interface(
     outputs=gr.HTML(label="Analysis"),
     title="Context-Aware Emoji Toxicity Detector",
     description=(
-        "Detect toxic emoji usage using **RAG** (Retrieval-Augmented Generation). "
-        "The same emoji can be toxic or safe depending on context. "
-        "This system retrieves emoji slang knowledge and uses an LLM judge to classify usage."
+        "An **agent** (GPT-5 with tool-calling) decides whether to retrieve emoji slang "
+        "knowledge, what to look up, and which tools to use — then emits a structured "
+        "verdict (TOXIC / SAFE / UNCERTAIN). The agent's tool calls are shown below the "
+        "verdict so you can see what it chose to investigate."
     ),
     examples=EXAMPLES,
     theme=gr.themes.Soft(),
     flagging_mode="never",
 )
 
+
+def flag_submission(message: str, context: str, correction: str) -> str:
+    """Save a user-flagged misclassification for dynamic KB review."""
+    import json
+    from pathlib import Path
+    from emoji_toxicity.config import DATA_DIR
+
+    path = DATA_DIR / "user_submissions.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as f:
+        f.write(json.dumps({
+            "text": message,
+            "context": context,
+            "flag": correction,
+        }, ensure_ascii=False) + "\n")
+    return f"Flagged for review. Thank you!"
+
+
+flag_ui = gr.Interface(
+    fn=flag_submission,
+    inputs=[
+        gr.Textbox(label="Message", placeholder="The message that was misclassified"),
+        gr.Textbox(label="Context", placeholder="Surrounding context"),
+        gr.Textbox(label="What should the correct label be?", placeholder="e.g. 'TOXIC — this emoji means cocaine'"),
+    ],
+    outputs=gr.Textbox(label="Status"),
+    title="Flag Misclassification",
+    description="Report an emoji the system got wrong. Your submission will be reviewed for KB updates.",
+)
+
+app = gr.TabbedInterface(
+    [demo, flag_ui],
+    ["Detect", "Flag Misclassification"],
+    title="Context-Aware Emoji Toxicity Detector",
+)
+
 if __name__ == "__main__":
-    demo.launch()
+    app.launch()

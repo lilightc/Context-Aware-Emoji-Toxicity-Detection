@@ -41,5 +41,15 @@ class Settings(BaseSettings):
     toxic_threshold: float = 0.7
     safe_threshold: float = 0.3
 
+    # Detector mode: "agent" (tool-calling, default) or "workflow" (fixed retrieve→classify)
+    detector_mode: str = "workflow"
+    agent_max_iterations: int = 4
+
+    # Dynamic KB
+    kb_update_min_sources: int = 3  # minimum independent sources to confirm new slang
+    kb_update_confidence: float = 0.7  # LLM extraction confidence threshold
+    reddit_client_id: str = ""
+    reddit_client_secret: str = ""
+
 
 settings = Settings()

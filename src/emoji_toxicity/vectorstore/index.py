@@ -13,6 +13,42 @@ from emoji_toxicity.config import settings, KB_PATH
 from emoji_toxicity.utils import make_vec_id
 
 
+# Common emoji that are almost never coded/toxic — safe anchors for KB balancing
+_SAFE_ANCHORS = {
+    "😊", "😄", "😃", "🥰", "😍", "👍", "👋", "🙏", "❤️", "💙",
+    "🎉", "🎂", "🎄", "🎁", "☀️", "🌈", "⭐", "🌺", "🌸", "🌻",
+    "🏠", "🚗", "✈️", "📚", "🎵", "⚽", "🏀", "🎮", "📱", "💻",
+    "🐕", "🐈", "🐟", "🦋", "☕", "🍕", "🍎", "🥗", "🍞", "🧀",
+    "👶", "👨‍👩‍👧", "🎓", "💼", "🏥", "⏰", "📧", "✅", "🔑", "🏔️",
+}
+
+
+def _build_safe_entries(all_entries: list[dict], max_safe: int = 100) -> list[dict]:
+    """Create safe-anchor entries for common literal-use emoji.
+
+    These entries explicitly state "this emoji is almost always used literally"
+    so the LLM doesn't only see "this emoji has a coded meaning" in retrievals.
+    """
+    # Don't duplicate — skip emoji already in the coded set
+    coded_symbols = {e["symbol"] for e in all_entries if e.get("slang_meaning")}
+    safe = []
+    for entry in all_entries:
+        sym = entry.get("symbol", "")
+        if sym in coded_symbols or sym not in _SAFE_ANCHORS:
+            continue
+        safe.append({
+            "symbol": sym,
+            "literal_meaning": entry.get("literal_meaning", ""),
+            "slang_meaning": "None — this emoji is almost always used literally.",
+            "risk_category": "Safe",
+            "toxic_signals": [],
+            "benign_signals": [],
+        })
+        if len(safe) >= max_safe:
+            break
+    return safe
+
+
 def _format_embedding_text(entry: dict) -> str:
     """Format a KB entry into text for embedding."""
     parts = [f"Symbol: {entry['symbol']}"]
@@ -65,14 +101,20 @@ def build_index(kb_path: str | None = None, batch_size: int = 50) -> int:
                 entries.append(json.loads(line))
     print(f"Loaded {len(entries)} KB entries")
 
-    # Filter: only entries with meaningful content (not just CLDR stubs)
-    entries = [
+    # Primary: entries with slang/coded meanings
+    coded_entries = [
         e for e in entries
         if e.get("risk_category") and e["risk_category"] != "Safe"
         or e.get("slang_meaning")
         or e.get("slang_definition")
     ]
-    print(f"Indexing {len(entries)} non-trivial entries")
+
+    # KB balancing: add common safe-only emoji so the LLM sees "this emoji is
+    # almost always literal" entries alongside slang entries. Prevents the
+    # retrieval from being universally biased toward TOXIC.
+    safe_entries = _build_safe_entries(entries, max_safe=100)
+    entries = coded_entries + safe_entries
+    print(f"Indexing {len(coded_entries)} coded + {len(safe_entries)} safe-anchor = {len(entries)} total")
 
     # Connect to Pinecone
     pc = Pinecone(api_key=settings.pinecone_api_key)

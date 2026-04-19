@@ -1,8 +1,8 @@
-"""Query expansion + multi-result retrieval with confidence scoring."""
+"""Query expansion + multi-result retrieval with similarity scores."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 
 from langchain_core.documents import Document
@@ -12,8 +12,9 @@ from emoji_toxicity.utils import cldr_name, extract_emojis
 
 @dataclass
 class RetrievalResult:
-    """Result from retrieval with confidence metadata."""
+    """Result from retrieval with similarity scores."""
     documents: list[Document]
+    scores: list[float]  # cosine similarity per document (1.0 = perfect match)
     query: str
     expanded_query: str
     emoji_found: list[str]
@@ -35,27 +36,30 @@ def _expand_query(text: str) -> str:
 
 
 @lru_cache(maxsize=1)
-def _get_retriever(k: int):
-    # Lazy import keeps Pinecone out of import-time path (tests don't need it).
+def _get_vectorstore():
     from emoji_toxicity.vectorstore.store import get_vectorstore
-
-    return get_vectorstore().as_retriever(
-        search_type="similarity",
-        search_kwargs={"k": k},
-    )
+    return get_vectorstore()
 
 
 def retrieve(text: str, k: int = 3) -> RetrievalResult:
-    """Retrieve relevant KB entries for a text message.
+    """Retrieve relevant KB entries with similarity scores.
 
-    Performs query expansion (emoji → CLDR name) then similarity search.
+    Uses similarity_search_with_score to return cosine similarity alongside
+    each document, so the LLM can discount low-relevance retrievals.
     """
     emojis = extract_emojis(text)
     expanded = _expand_query(text)
-    docs = _get_retriever(k).invoke(expanded)
+
+    vs = _get_vectorstore()
+    results = vs.similarity_search_with_score(expanded, k=k)
+
+    docs = [doc for doc, _score in results]
+    # Pinecone returns cosine similarity (higher = better, max 1.0)
+    scores = [float(score) for _doc, score in results]
 
     return RetrievalResult(
         documents=docs,
+        scores=scores,
         query=text,
         expanded_query=expanded,
         emoji_found=emojis,

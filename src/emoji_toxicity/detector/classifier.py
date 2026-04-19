@@ -1,4 +1,11 @@
-"""LLM judge with structured JSON output for emoji toxicity classification."""
+"""LLM judge with structured JSON output for emoji toxicity classification.
+
+The model emits a calibrated *toxicity_score* in [0, 1] (0 = clearly SAFE, 1 =
+clearly TOXIC). The final TOXIC / SAFE / UNCERTAIN verdict is derived from this
+score by the confidence gate in pipeline.py — the model does not emit a verdict
+string, eliminating the old calibration pathology where "confidence" meant
+"confidence in verdict" (symmetric, AUROC-uninterpretable).
+"""
 
 from __future__ import annotations
 
@@ -20,9 +27,11 @@ class EmojiAnalysis(BaseModel):
 
 class ClassificationResult(BaseModel):
     """Structured output from the LLM judge."""
-    verdict: str = Field(description="One of: TOXIC, SAFE, UNCERTAIN")
-    confidence: float = Field(description="Confidence score between 0.0 and 1.0")
-    reasoning: str = Field(description="Brief explanation of the verdict")
+    toxicity_score: float = Field(
+        description="Probability the message is toxic. 0.0 = clearly SAFE, "
+        "1.0 = clearly TOXIC, 0.5 = genuinely uncertain."
+    )
+    reasoning: str = Field(description="Brief explanation of the score")
     risk_category: str = Field(
         description="Category: Hate Speech, Sexual, Political, Drug, Safe, Unclear"
     )
@@ -40,10 +49,15 @@ Analyze the relationship between the message, its context, and the retrieved kno
 1. For each emoji, determine if it is used LITERALLY (benign) or as CODED LANGUAGE (slang/dog whistle).
 2. Consider the surrounding context — the same emoji can be toxic or safe depending on usage.
 3. Use the retrieved knowledge to inform your decision, but apply judgment.
+4. Each retrieved entry has a Relevance score (0-1). Discount entries with low relevance (< 0.5) — they may not match the emoji in question.
 
-Output your analysis as structured JSON with:
-- verdict: TOXIC, SAFE, or UNCERTAIN (use UNCERTAIN when context is ambiguous)
-- confidence: 0.0 to 1.0
+Output structured JSON with:
+- toxicity_score: a calibrated probability the message is toxic.
+    * 0.0-0.2: clearly SAFE (literal usage, benign context)
+    * 0.3-0.6: genuinely UNCERTAIN (ambiguous context, mixed signals)
+    * 0.7-1.0: clearly TOXIC (coded language, harmful intent)
+  The score must be monotone with toxicity — higher = more toxic. Do NOT encode
+  "confidence in my answer" here; encode "probability the message is toxic".
 - reasoning: brief explanation
 - risk_category: Hate Speech, Sexual, Political, Drug, Safe, or Unclear
 - emoji_analysis: per-emoji breakdown with emoji, interpretation, and risk level"""
@@ -51,12 +65,12 @@ Output your analysis as structured JSON with:
 HUMAN_TEMPLATE = """Context: {context_text}
 Message: {message}
 
-Analyze the emoji usage in this message."""
+Analyze the emoji usage and return the structured JSON."""
 
 
-@lru_cache(maxsize=1)
-def _get_chain():
-    """Build the prompt → structured-LLM chain once and cache it."""
+@lru_cache(maxsize=8)
+def _get_chain(seed: int | None = None):
+    """Build the prompt → structured-LLM chain. Cached per seed for multi-seed eval."""
     prompt = ChatPromptTemplate.from_messages([
         ("system", SYSTEM_PROMPT),
         ("human", HUMAN_TEMPLATE),
@@ -65,6 +79,7 @@ def _get_chain():
         model=settings.llm_model,
         temperature=settings.llm_temperature,
         api_key=settings.openai_api_key,
+        seed=seed,
     )
     return prompt | llm.with_structured_output(ClassificationResult)
 
@@ -73,9 +88,10 @@ def classify(
     message: str,
     context_text: str,
     retrieved_knowledge: str,
+    seed: int | None = None,
 ) -> ClassificationResult:
     """Run the LLM judge on a message with context and retrieved knowledge."""
-    return _get_chain().invoke({
+    return _get_chain(seed).invoke({
         "context": retrieved_knowledge,
         "context_text": context_text,
         "message": message,
