@@ -10,8 +10,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 
 from emoji_toxicity.config import settings, KB_PATH, RESULTS_DIR
 

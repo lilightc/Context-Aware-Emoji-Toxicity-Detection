@@ -12,7 +12,7 @@ from functools import lru_cache
 from openai import OpenAI
 
 from emoji_toxicity.config import settings
-from emoji_toxicity.utils import extract_emojis, cldr_name
+from emoji_toxicity.utils import cldr_name
 
 
 @lru_cache(maxsize=1)

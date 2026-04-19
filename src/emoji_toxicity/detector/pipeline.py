@@ -20,6 +20,7 @@ from emoji_toxicity.detector.agent import AgentTrace, run_agent
 from emoji_toxicity.detector.classifier import ClassificationResult, classify
 from emoji_toxicity.detector.retrieval_gate import needs_retrieval
 from emoji_toxicity.detector.retriever import retrieve
+from emoji_toxicity.detector.tools import TERMINAL_TOOL_NAME
 from emoji_toxicity.utils import format_retrieved_docs, verdict_from_score
 
 
@@ -47,7 +48,7 @@ class DetectionResult:
             "mode": self.mode,
             "n_agent_iterations": self.agent_trace.iterations if self.agent_trace else None,
             "n_info_tool_calls": (
-                sum(1 for c in self.agent_trace.tool_calls if c["name"] != "submit_verdict")
+                sum(1 for c in self.agent_trace.tool_calls if c["name"] != TERMINAL_TOOL_NAME)
                 if self.agent_trace
                 else None
             ),

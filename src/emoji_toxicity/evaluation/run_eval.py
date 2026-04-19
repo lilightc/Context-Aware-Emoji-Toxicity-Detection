@@ -92,7 +92,8 @@ def _agent_trace_summary(result: DetectionResult) -> dict:
     if result.agent_trace is None:
         return {}
     t = result.agent_trace
-    tool_names = [c["name"] for c in t.tool_calls if c["name"] != "submit_verdict"]
+    from emoji_toxicity.detector.tools import TERMINAL_TOOL_NAME
+    tool_names = [c["name"] for c in t.tool_calls if c["name"] != TERMINAL_TOOL_NAME]
     return {
         "agent_iterations": t.iterations,
         "agent_info_tool_calls": len(tool_names),

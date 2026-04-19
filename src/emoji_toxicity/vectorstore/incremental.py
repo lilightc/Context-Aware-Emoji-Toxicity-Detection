@@ -8,8 +8,8 @@ version-tagged with a timestamp for freshness tracking.
 from __future__ import annotations
 
 import json
-import time
 from datetime import datetime, timezone
+from functools import lru_cache
 
 from pinecone import Pinecone
 from sentence_transformers import SentenceTransformer
@@ -17,6 +17,11 @@ from sentence_transformers import SentenceTransformer
 from emoji_toxicity.config import settings, KB_PATH, PROCESSED_DIR
 from emoji_toxicity.utils import make_vec_id
 from emoji_toxicity.vectorstore.index import _format_embedding_text, _make_metadata
+
+
+@lru_cache(maxsize=1)
+def _get_model():
+    return SentenceTransformer(settings.embedding_model)
 
 
 def upsert_entries(
@@ -63,7 +68,7 @@ def upsert_entries(
 
     # Embed and upsert into Pinecone
     print("Embedding new entries...")
-    model = SentenceTransformer(settings.embedding_model)
+    model = _get_model()
     texts = [_format_embedding_text(e) for e in normalized]
     vectors = model.encode(texts, batch_size=32)
 
