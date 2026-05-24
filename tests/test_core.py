@@ -205,25 +205,6 @@ def test_context_flip_bench():
         assert ":" in s.perturbation_type
 
 
-def test_retrieval_gate():
-    """Retrieval gate fires for coded emoji, skips for safe-only."""
-    from emoji_toxicity.detector.retrieval_gate import needs_retrieval
-
-    # Should trigger: coded emoji present
-    assert needs_retrieval("She is a 🌽 star", "Check out my content") is True
-    assert needs_retrieval("Got ❄️ tonight", "HMU") is True
-
-    # Should trigger: slang context keywords even with safe emoji
-    assert needs_retrieval("Check 😊", "link in bio") is True
-
-    # Should NOT trigger: common safe emoji in benign context
-    assert needs_retrieval("Great job! 👍", "Team meeting notes") is False
-    assert needs_retrieval("Happy birthday! 🎂🎉", "Party at 5pm") is False
-
-    # Should NOT trigger: no emoji at all
-    assert needs_retrieval("Hello world", "") is False
-
-
 def test_format_docs_with_scores():
     """format_retrieved_docs includes relevance scores when provided."""
     from emoji_toxicity.utils import format_retrieved_docs
@@ -286,6 +267,21 @@ def test_kb_health_report():
     assert "error" in report or "total_entries" in report
 
 
+def test_hybrid_retriever_shape():
+    """RetrievalResult exposes documents, scores, and origins of equal length."""
+    from emoji_toxicity.detector.retriever import RetrievalResult, _expand_query
+
+    expanded = _expand_query("She is a 🌽 star")
+    assert "corn" in expanded.lower() or "maize" in expanded.lower()
+
+    # Direct dataclass shape check (no Pinecone call)
+    r = RetrievalResult(
+        documents=[], scores=[], origins=[],
+        query="x", expanded_query="x", emoji_found=[],
+    )
+    assert len(r.documents) == len(r.scores) == len(r.origins)
+
+
 def test_detector_rejects_unknown_mode():
     """ToxicityDetector validates the mode argument."""
     import pytest
@@ -294,6 +290,5 @@ def test_detector_rejects_unknown_mode():
     with pytest.raises(ValueError):
         ToxicityDetector(mode="magic")
 
-    # Adaptive mode should be accepted
-    d = ToxicityDetector(mode="adaptive")
-    assert d.mode == "adaptive"
+    for mode in ("workflow", "agent"):
+        assert ToxicityDetector(mode=mode).mode == mode

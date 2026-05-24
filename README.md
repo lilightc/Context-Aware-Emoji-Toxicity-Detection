@@ -55,28 +55,38 @@ The last row is the honest limitation: **RAG can't help on emoji not in the KB.*
 Message + Context
        │
        ▼
-┌──────────────────┐    ┌─────────────────────┐
-│ Query Expansion  │───▶│ Pinecone Vector     │
-│ (emoji → CLDR    │    │ Store (384-dim)     │
-│  short name)     │    │ 534 entries         │
-└──────────────────┘    └──────────┬──────────┘
-                                   │ top-k=3 + similarity scores
-                                   ▼
-                        ┌─────────────────────┐
-                        │ LLM Judge (GPT-5)   │
-                        │ → toxicity_score    │
-                        │ → reasoning         │
-                        │ → emoji_analysis[]  │
-                        └──────────┬──────────┘
-                                   │
-                                   ▼
-                        ┌─────────────────────┐
-                        │ Score Gate           │
-                        │ ≥0.7 → TOXIC        │
-                        │ ≤0.3 → SAFE         │
-                        │ else → UNCERTAIN    │
-                        └─────────────────────┘
+┌────────────────────────────────────────────────────┐
+│ Hybrid Retrieval (k=3)                             │
+│                                                    │
+│  1. extract_emojis(message)                        │
+│  2. EXACT-SYMBOL FETCH (primary)                   │
+│     Pinecone .fetch(ids=["vec_<codepoints>"])      │
+│     → score = 1.0, origin = "exact"                │
+│  3. DENSE BACKFILL (fills remaining slots)         │
+│     similarity_search on CLDR-expanded query       │
+│     all-MiniLM-L6-v2 (384-dim), cosine             │
+│     → score ∈ [0,1], origin = "dense"              │
+│  4. Merge + dedupe by symbol                       │
+└────────────────┬───────────────────────────────────┘
+                 │ ≤ k=3 docs with scores
+                 ▼
+      ┌─────────────────────┐
+      │ LLM Judge (GPT-5)   │  injects "Relevance: x.xx"
+      │ → toxicity_score    │  per doc; soft re-ranks
+      │ → reasoning         │  by discounting low scores
+      │ → emoji_analysis[]  │
+      └──────────┬──────────┘
+                 │
+                 ▼
+      ┌─────────────────────┐
+      │ Score Gate          │
+      │ ≥0.7 → TOXIC        │
+      │ ≤0.3 → SAFE         │
+      │ else → UNCERTAIN    │
+      └─────────────────────┘
 ```
+
+**Hybrid retrieval rationale:** dense embedding alone confuses near-identical emoji (e.g. retrieving 🐵 when the query is 🐒, or 💙 when the query is 🅱). A diagnostic on 30 sampled emoji showed dense top-1 recall was only 77%. Exact-symbol lookup via deterministic vector IDs is 100% accurate when the symbol is indexed and is used as the primary key; dense search backfills the remaining slots with semantically-related context. After this change: **100% top-1 / 100% top-3** on the same diagnostic. Run `python -m scripts.diagnose_retrieval` to reproduce.
 
 ### Dynamic KB Update Pipeline
 
@@ -117,12 +127,11 @@ Message + Context
 
 **Ablation result:** In our experiments, the agent skipped retrieval on 54% of samples but achieved **lower accuracy than workflow** (0.910 vs 0.948) because it defaults to "looks safe, skip retrieval" on ambiguous cases — exactly where retrieval is most needed. Workflow is also 2.2× faster (1 LLM call vs 2-4 round-trips). The agent remains as an experimental option for research and for future scenarios with multiple heterogeneous tools.
 
-### Three Operating Modes
+### Operating Modes
 
 | Mode | Accuracy | Latency | Best for |
 |------|----------|---------|----------|
 | `workflow` | **0.948** | **11.0s** | Production (best accuracy + speed) |
-| `adaptive` | — | — | Cost optimization on mostly-safe traffic |
 | `agent` | 0.910 | 24.2s | Research / demo (tool-calling capability) |
 
 ## Quick Start
@@ -196,12 +205,11 @@ python -m scripts.calibrate_thresholds               # sweep on val split, repor
 │   │   └── incremental.py            # Dynamic: append-only upsert of new entries
 │   │
 │   ├── detector/
-│   │   ├── retriever.py              # Query expansion + similarity scores
+│   │   ├── retriever.py              # Hybrid: exact-symbol fetch + dense fallback
 │   │   ├── classifier.py             # LLM judge: toxicity_score with relevance-aware prompt
-│   │   ├── retrieval_gate.py         # Heuristic: does this message need KB lookup?
 │   │   ├── tools.py                  # Agent tools: lookup, search, cldr, submit_verdict
 │   │   ├── agent.py                  # Tool-calling agent loop
-│   │   └── pipeline.py               # ToxicityDetector: workflow | adaptive | agent
+│   │   └── pipeline.py               # ToxicityDetector: workflow | agent
 │   │
 │   └── evaluation/
 │       ├── context_flip_bench.py     # 155-sample context-sensitivity benchmark
@@ -215,7 +223,8 @@ python -m scripts.calibrate_thresholds               # sweep on val split, repor
 │   ├── build_knowledge_base.py       # CLI: build static KB
 │   ├── build_index.py                # CLI: full Pinecone index rebuild
 │   ├── evaluate.py                   # CLI: run eval benchmarks
-│   ├── calibrate_thresholds.py       # CLI: threshold sweep on val split
+│   ├── calibrate_thresholds.py      # CLI: threshold sweep on val split
+│   ├── diagnose_retrieval.py         # CLI: top-1/top-3 retrieval recall sanity check
 │   └── update_kb.py                  # CLI: dynamic KB update pipeline
 │
 ├── app.py                            # Gradio: Detect tab + Flag Misclassification tab
@@ -230,7 +239,7 @@ python -m scripts.calibrate_thresholds               # sweep on val split, repor
 │       ├── eval_traces.jsonl
 │       ├── eval_baseline.json        # accuracy baseline for regression detection
 │       └── kb_validation*.jsonl      # validation audit logs
-└── tests/test_core.py                # 19 unit tests, no API keys needed
+└── tests/test_core.py                # unit tests, no API keys needed
 ```
 
 ## Tech Stack

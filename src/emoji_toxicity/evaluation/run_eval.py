@@ -144,7 +144,6 @@ def run_full_evaluation(
 
     agent_detector = ToxicityDetector(mode="agent")
     workflow_detector = ToxicityDetector(mode="workflow") if compare_modes else None
-    adaptive_detector = ToxicityDetector(mode="adaptive") if compare_modes else None
 
     def make_fns(seed: int | None) -> dict[str, ClassifyFn]:
         def kw_fn(s: EvalSample) -> ClassifyReturn:
@@ -169,17 +168,11 @@ def run_full_evaluation(
                 return r.toxicity_score, {}
             fns["rag_workflow"] = workflow_fn
 
-        if adaptive_detector is not None:
-            def adaptive_fn(s: EvalSample) -> ClassifyReturn:
-                r = adaptive_detector.detect(s.text, s.context, seed=seed)
-                return r.toxicity_score, {"adaptive_retrieved": "(retrieval skipped" not in str(r.citations)}
-            fns["rag_adaptive"] = adaptive_fn
-
         return fns
 
     method_names = ["keyword_baseline", "raw_llm", "rag_agent"]
     if compare_modes:
-        method_names.extend(["rag_workflow", "rag_adaptive"])
+        method_names.append("rag_workflow")
 
     per_seed_results: dict[str, list[EvalMetrics]] = defaultdict(list)
     per_sample_records: dict[str, list[dict]] = defaultdict(list)

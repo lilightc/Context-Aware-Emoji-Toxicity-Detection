@@ -20,60 +20,96 @@ Emoji are increasingly used as **coded language** in online harassment, hate spe
 
 ## 2. System Architecture
 
-### 2.1 Three Operating Modes
+### 2.1 Operating Modes
 
-The system supports three inference modes via a single `ToxicityDetector` class:
+The system supports two inference modes via a single `ToxicityDetector` class:
 
 **Workflow mode** (default, best performance):
 ```
 Message + Context
        │
        ▼
-┌──────────────────┐    ┌─────────────────────┐
-│ Query Expansion  │───▶│ Pinecone Vector     │
-│ (emoji → CLDR    │    │ Store (384-dim)     │
-│  short name)     │    │ 534 entries         │
-└──────────────────┘    └──────────┬──────────┘
-                                   │ top-k=3 + similarity scores
-                                   ▼
-                        ┌─────────────────────┐
-                        │ LLM Judge (GPT-5)   │
-                        │ → toxicity_score    │
-                        │ → reasoning         │
-                        │ → risk_category     │
-                        │ → emoji_analysis[]  │
-                        └──────────┬──────────┘
-                                   │
-                                   ▼
-                        ┌─────────────────────┐
-                        │ Score Gate           │
-                        │ ≥0.7 → TOXIC        │
-                        │ ≤0.3 → SAFE         │
-                        │ else → UNCERTAIN    │
-                        └─────────────────────┘
+┌────────────────────────────────────────────────────┐
+│ Hybrid Retrieval (k=3) — Section 2.3               │
+│   1. extract_emojis(message)                       │
+│   2. Exact-symbol fetch (primary, score = 1.0)     │
+│   3. Dense backfill on CLDR-expanded query         │
+│   4. Merge + dedupe by symbol                      │
+└────────────────┬───────────────────────────────────┘
+                 │ ≤ k=3 docs with scores
+                 ▼
+      ┌─────────────────────┐
+      │ LLM Judge (GPT-5)   │
+      │ → toxicity_score    │
+      │ → reasoning         │
+      │ → risk_category     │
+      │ → emoji_analysis[]  │
+      └──────────┬──────────┘
+                 │
+                 ▼
+      ┌─────────────────────┐
+      │ Score Gate          │
+      │ ≥0.7 → TOXIC        │
+      │ ≤0.3 → SAFE         │
+      │ else → UNCERTAIN    │
+      └─────────────────────┘
 ```
 
-**Agent mode** (experimental): Tool-calling GPT-5 agent that decides whether/what to retrieve. Has access to `get_cldr_name`, `lookup_emoji_knowledge`, `search_similar_cases`, and `submit_verdict` tools. Max 4 iterations.
+**Agent mode** (experimental): Tool-calling GPT-5 agent that decides whether/what to retrieve. Has access to `get_cldr_name`, `lookup_emoji_knowledge`, `search_similar_cases`, and `submit_verdict` tools. Max 4 iterations. Workflow mode is the default because the ablation in Section 4.4 showed it beats agent mode on accuracy, latency, and cost.
 
-**Adaptive mode** (hybrid): Lightweight heuristic gate (`retrieval_gate.py`) decides whether to retrieve based on presence of known coded emoji, slang trigger keywords in context, and emoji-to-text ratio. If gate fires → full workflow. If not → classify without retrieval.
+> **Removed:** an earlier "adaptive mode" used a heuristic gate (`retrieval_gate.py`) to decide whether to retrieve. The gate's emoji-ratio check was unsound (a single-emoji "👍" message scored ratio 1.0 and over-triggered) and the cost savings were never proven on a benchmark. The mode was removed; current modes are `workflow` and `agent` only.
 
-### 2.2 Query Expansion
+### 2.2 Query Expansion (dense path only)
 
-Before retrieval, each emoji in the message is annotated with its Unicode CLDR short name: `"She is a 🌽 star"` → `"She is a 🌽 (ear of corn) star"`. This gives the embedding model (all-MiniLM-L6-v2, which was not trained on emoji codepoints) lexical anchors for similarity search.
+For the dense fallback in retrieval, each emoji in the message is annotated with its Unicode CLDR short name: `"She is a 🌽 star"` → `"She is a 🌽 (ear of corn) star"`. This gives the embedding model (all-MiniLM-L6-v2, which was not trained on emoji codepoints) lexical anchors for similarity search. The exact-symbol fetch path bypasses expansion — it keys directly on the codepoint.
 
-### 2.3 Retrieval with Similarity Scores
+### 2.3 Hybrid Retrieval
 
-The retriever returns cosine similarity scores alongside documents. Each retrieved entry is shown to the LLM as:
+The retriever runs two strategies in priority order:
+
+**Stage 1 — Exact-symbol fetch (primary).** Each KB entry is indexed under a deterministic vector ID (`vec_<hex codepoints>`). For every emoji extracted from the message, we issue a single Pinecone `fetch(ids=[...])` call. Hits are returned with `score = 1.0` and `origin = "exact"`. This is O(1) per emoji and 100% accurate when the symbol is indexed.
+
+**Stage 2 — Dense semantic search (backfill).** If Stage 1 returned fewer than `k` docs (no emoji in message, or some not in KB), the CLDR-expanded query is run through `similarity_search_with_score` against the same Pinecone index. Results are deduped against Stage 1 by symbol. Cosine similarity is preserved as `score`.
+
+**Slot allocation by message composition** (with `k=3`):
+
+| Unique indexed emoji in message | Exact slots | Dense backfill |
+|---|---|---|
+| 0 (or none in KB) | 0 | 3 |
+| 1 | 1 | 2 |
+| 2 | 2 | 1 |
+| ≥ 3 | 3 | 0 |
+
+**Why hybrid was needed.** Initial implementation used dense-only retrieval. A diagnostic on 30 randomly sampled emoji from the KB (`scripts/diagnose_retrieval.py`) showed dense top-1 recall was only **77%** on bare-emoji queries and **80%** on in-sentence queries. The misses were all visually/semantically related but wrong:
+- `🅱` (B button, hate-speech context) → returned `💙`, `🚑`, `❤️` (other red/blue shapes)
+- `🥘` (paella) → returned other food emoji
+- `🐒` (monkey, racial slur context) → returned `🐵` — a *different codepoint* with the same coded meaning
+
+That last failure mode was the worst: the embedder treats near-identical emoji as interchangeable, so a coded racial slur missed its own KB entry. After adding exact-symbol fetch as the primary stage:
+
+| Variant | Before (dense only) | After (hybrid) |
+|---|---|---|
+| Bare emoji top-1 | 77% | **100%** |
+| Bare emoji top-3 | 90% | **100%** |
+| In-sentence top-1 | 80% | **100%** |
+| In-sentence top-3 | 93% | **100%** |
+
+Confirmed on a second sample (n=60, seed=7): also 100% / 100%. The diagnostic also verified all sampled emoji were indexed, so the gap was a retrieval failure, not a coverage failure.
+
+**Why not classical hybrid (BM25 + dense)?** Considered and rejected. The KB is only ~534 entries (too small for BM25's term-frequency model to add signal), and the discriminating token in user messages is almost always the emoji codepoint itself, not natural-language vocabulary. BM25 would not have caught the `🐒/🐵` case either. Exact-symbol lookup is the right structural fix, not a sparse-text component.
+
+### 2.3.1 Soft Re-ranking via the LLM
+
+There is no separate cross-encoder reranker. Instead, the per-doc cosine score (or `1.0` for exact matches) is injected into the LLM judge's prompt:
 ```
 [1] 🌽
-  Relevance: 0.920
+  Relevance: 1.000
   Slang meaning: euphemism for pornography
   Risk category: Sexual
   Toxic signals: link in bio, exclusive content, OnlyFans, adult, 18+
   Benign signals: recipe, farm, corn on the cob, harvest, agriculture
 ```
-
-The classifier prompt instructs the LLM to discount entries with relevance < 0.5. This prevents irrelevant retrievals from biasing the classification.
+The classifier prompt instructs: *"Discount entries with low relevance (< 0.5)."* This is a soft rerank — the LLM does the discounting in its score formation rather than a separate model re-scoring documents. This is appropriate at `k=3` and would be replaced with a cross-encoder if `k` ever grew beyond 8–10.
 
 ### 2.4 Toxicity Score vs. Confidence
 
@@ -155,10 +191,16 @@ Ran gpt-4o-mini through the workflow to test whether a cheap model + RAG can mat
 Created a 55-sample benchmark with thread context, sarcasm, plausible deniability, mixed signals, and novel slang. RAG showed +20pp lift on realistic scenarios, but scored 62% on novel slang NOT in the KB — identical to raw GPT-5 — confirming the KB is the bottleneck (Section 4.6).
 
 ### Phase 9: Architectural Improvements
-Implemented retrieval scores as LLM features, KB balancing with safe anchors, adaptive retrieval gate, and threshold calibration. Measured impact: minimal on current benchmarks, but architecturally sound for larger/noisier future KBs (Section 4.7).
+Implemented retrieval scores as LLM features, KB balancing with safe anchors, and threshold calibration. Measured impact: minimal on current benchmarks, but architecturally sound for larger/noisier future KBs (Section 4.7).
 
 ### Phase 10: Dynamic KB Pipeline
 Built the full collect → extract → validate → index → monitor pipeline to address the novel-slang ceiling. Dry-run test: collected 28 Reddit posts, extracted 7 slang candidates, validated 1 (😭 as laugh-cry intensifier), rejected 4 (insufficient sources or confidence), flagged 1 conflict (💀 risk category mismatch) (Section 4.8).
+
+### Phase 11: Retrieval Diagnostics → Hybrid Retriever
+A targeted diagnostic (`scripts/diagnose_retrieval.py`) revealed that dense-only retrieval was achieving only 77% top-1 / 90% top-3 recall on bare-emoji queries — the embedder confuses near-identical emoji (`🐒` vs `🐵`, `🅱` vs `💙`). Added exact-symbol fetch via deterministic vector IDs as the primary retrieval stage; dense becomes a backfill for free-form context queries. Recall jumped to 100% / 100% on the same diagnostic. Implementation: `vectorstore/store.py:fetch_by_symbols` + `detector/retriever.py` (Section 2.3).
+
+### Phase 12: Removed Adaptive Mode
+The third operating mode (`adaptive`) used a heuristic gate to decide whether to retrieve, including an emoji-to-text-ratio check that produced false positives on trivial messages (`"👍"` triggers retrieval at ratio 1.0). The gate's cost-saving claim was never validated on a benchmark, and `adaptive` accuracy was never measured (`—` in the operating-modes table). Removed the gate, the mode, and the corresponding test. Pipeline now has two clear modes: `workflow` (default) and `agent` (research).
 
 ## 4. Experimental Results
 
@@ -374,12 +416,11 @@ emoji-toxicity-detector/
 │   │   └── incremental.py            # Dynamic: append-only upsert of new entries
 │   │
 │   ├── detector/
-│   │   ├── retriever.py              # Query expansion + similarity scores + cached retriever
+│   │   ├── retriever.py              # Hybrid: exact-symbol fetch + dense fallback
 │   │   ├── classifier.py             # LLM judge: toxicity_score with relevance-aware prompt
-│   │   ├── retrieval_gate.py         # Heuristic: does this message need KB lookup?
 │   │   ├── tools.py                  # Agent tools: lookup, search, cldr, submit_verdict
 │   │   ├── agent.py                  # Tool-calling agent loop (max 4 iterations, fallback)
-│   │   └── pipeline.py               # ToxicityDetector: mode="workflow" | "agent" | "adaptive"
+│   │   └── pipeline.py               # ToxicityDetector: mode="workflow" | "agent"
 │   │
 │   └── evaluation/
 │       ├── context_flip_bench.py     # 155-sample context-sensitivity benchmark

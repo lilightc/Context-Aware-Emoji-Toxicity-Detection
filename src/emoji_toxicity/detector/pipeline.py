@@ -18,7 +18,6 @@ from dataclasses import dataclass
 from emoji_toxicity.config import settings
 from emoji_toxicity.detector.agent import AgentTrace, run_agent
 from emoji_toxicity.detector.classifier import ClassificationResult, classify
-from emoji_toxicity.detector.retrieval_gate import needs_retrieval
 from emoji_toxicity.detector.retriever import retrieve
 from emoji_toxicity.detector.tools import TERMINAL_TOOL_NAME
 from emoji_toxicity.utils import format_retrieved_docs, verdict_from_score
@@ -72,9 +71,9 @@ class ToxicityDetector:
         agent_max_iterations: int | None = None,
     ):
         self.mode = mode or settings.detector_mode
-        if self.mode not in ("agent", "workflow", "adaptive"):
+        if self.mode not in ("agent", "workflow"):
             raise ValueError(
-                f"Unknown mode {self.mode!r}; expected 'agent', 'workflow', or 'adaptive'."
+                f"Unknown mode {self.mode!r}; expected 'agent' or 'workflow'."
             )
         self.retrieval_k = retrieval_k or settings.retrieval_k
         self.toxic_threshold = toxic_threshold or settings.toxic_threshold
@@ -143,39 +142,6 @@ class ToxicityDetector:
             raw_classification=classification,
         )
 
-    # ---------- adaptive mode ----------
-
-    def _detect_adaptive(
-        self, message: str, context: str, seed: int | None
-    ) -> DetectionResult:
-        """Use the lightweight retrieval gate to decide whether to retrieve.
-
-        If the gate fires → full workflow (retrieve + classify).
-        If not → classify without retrieval (like raw_llm but with structured prompt).
-        """
-        if needs_retrieval(message, context):
-            return self._detect_workflow(message, context, seed)
-
-        # No retrieval — classify directly with "no relevant entries" context
-        classification = classify(
-            message=message,
-            context_text=context or "No additional context provided.",
-            retrieved_knowledge="No retrieval performed — message appears to use emoji literally.",
-            seed=seed,
-        )
-        return DetectionResult(
-            verdict=verdict_from_score(
-                classification.toxicity_score, self.toxic_threshold, self.safe_threshold
-            ),
-            toxicity_score=classification.toxicity_score,
-            reasoning=classification.reasoning,
-            risk_category=classification.risk_category,
-            emoji_analysis=[ea.model_dump() for ea in classification.emoji_analysis],
-            citations=["(retrieval skipped by adaptive gate)"],
-            mode="adaptive",
-            raw_classification=classification,
-        )
-
     # ---------- entry point ----------
 
     def detect(
@@ -183,6 +149,4 @@ class ToxicityDetector:
     ) -> DetectionResult:
         if self.mode == "agent":
             return self._detect_agent(message, context, seed)
-        if self.mode == "adaptive":
-            return self._detect_adaptive(message, context, seed)
         return self._detect_workflow(message, context, seed)
